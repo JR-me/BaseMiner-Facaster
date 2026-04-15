@@ -2,20 +2,25 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="talentapp:project_verification" content="17b2a555571a4d804a6ca94819cde35cfcb892d4477d56f12ef08c1a39de99b207a6ae75a3c68d384c784429b865071fcd5757f760008cde720dc012da72ddb8" />
 <meta property="fc:frame" content='{"version":"next","imageUrl":"https://base-miner-facaster.vercel.app/og-image.png","button":{"title":"⛏ Play BaseMiner","action":{"type":"launch_frame","name":"BaseMiner","url":"https://base-miner-facaster.vercel.app/","splashImageUrl":"https://base-miner-facaster.vercel.app/splash.png","splashBackgroundColor":"#070a14"}}}' />
+<!-- Farcaster Mini App manifest — serve a JSON file at /.well-known/farcaster.json
+     on your domain with the same fields for full client support. See:
+     https://miniapps.farcaster.xyz/docs/guides/publishing -->
 <title>BaseMiner</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.1/ethers.umd.min.js"></script>
 <script type="module">
   try {
     // Load SDK and call ready() ASAP — this removes the Warpcast splash screen.
     // We do this before anything else so a JS error later doesn't leave a blank page.
-    const { sdk } = await import('https://esm.sh/@farcaster/frame-sdk@0.0.31');
+    // Using sdk@0.0.38+ which has stable context (not a Promise) and openUrl support.
+    const { sdk } = await import('https://esm.sh/@farcaster/frame-sdk@0.0.38');
     window.farcasterSdk = sdk;
-    await sdk.actions.ready();
+    // sdk.isInMiniApp() (or sdk.context.client) tells us we're inside a frame
+    await sdk.actions.ready({ disableNativeGestures: true });
   } catch(e) {
-    // Not inside Warpcast, or SDK failed — that's fine, app works without it
+    // Not inside Warpcast / Farcaster client, or SDK failed — app works without it
   }
   window.dispatchEvent(new Event('farcaster-sdk-ready'));
 </script>
@@ -36,7 +41,9 @@
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background: var(--bg); color: var(--text);
-    min-height: 100vh; font-size: 15px; line-height: 1.6;
+    min-height: 100vh; min-height: 100dvh; font-size: 15px; line-height: 1.6;
+    /* Respect safe-area insets when running inside a Farcaster mini app frame */
+    padding-bottom: env(safe-area-inset-bottom, 0);
   }
   .theme-transition { transition: background-color .45s ease, border-color .45s ease, color .3s ease; }
 
@@ -1195,7 +1202,20 @@ const TOOL_EMOJIS = ['⛏️','🔩','🏗️'];
 // ════════════════════════════════════════════════════════════════
 const isMiniPay    = () => !!(window.ethereum && window.ethereum.isMiniPay);
 const isBaseApp    = () => !!(window.ethereum && window.ethereum.isCoinbaseWallet);
-const isFarcaster  = () => !!(window.farcasterSdk);
+// isFarcaster: true when window.farcasterSdk is present AND we have a client context,
+// i.e. we are running inside a Farcaster / Warpcast mini app frame.
+const isFarcaster  = () => {
+  const sdk = window.farcasterSdk;
+  if (!sdk) return false;
+  // sdk.context is synchronous in frame-sdk >= 0.0.38
+  try {
+    const ctx = sdk.context;
+    return !!(ctx && ctx.client);
+  } catch(e) {
+    // Older SDK or non-frame environment
+    return !!sdk;
+  }
+};
 
 // ════════════════════════════════════════════════════════════════
 //  Init
@@ -1364,12 +1384,21 @@ async function autoConnectFarcaster() {
     updateChainBadge();
     renderChainList();
 
-    // Get user context
-    const context = await sdk.context;
+    // sdk.context is synchronous in frame-sdk >= 0.0.38
+    // (it was a Promise in earlier versions — handle both for safety)
+    const rawContext = sdk.context;
+    const context = rawContext && typeof rawContext.then === 'function'
+      ? await rawContext
+      : rawContext;
     const name = context?.user?.displayName || context?.user?.username || null;
 
-    // Connect wallet via Farcaster EIP-1193 provider
-    const ethProvider = sdk.wallet.ethProvider;
+    // Connect wallet via Farcaster EIP-1193 provider.
+    // In SDK >= 0.0.38 the provider lives at sdk.wallet.ethProvider.
+    const ethProvider = sdk.wallet?.ethProvider || sdk.wallet?.provider;
+    if (!ethProvider) {
+      toast('Wallet error', 'No Ethereum provider from Farcaster SDK', 'error');
+      return;
+    }
     const accs = await ethProvider.request({ method: 'eth_requestAccounts' });
     address  = accs[0];
     provider = new ethers.BrowserProvider(ethProvider);
@@ -1392,9 +1421,36 @@ async function autoConnectFarcaster() {
     }
     initContracts();
     toast('Connected', shortAddr(address), 'success');
+
+    // Prompt users to add the mini app to their Farcaster client
+    promptAddMiniApp();
   } catch(e) {
     // Wallet connect failed but UI is already visible — just show error
     toast('Wallet error', e.message || 'Could not connect wallet', 'error');
+  }
+}
+
+// Offer the user a one-time prompt to save the mini app
+function promptAddMiniApp() {
+  const sdk = window.farcasterSdk;
+  if (!sdk || !sdk.actions?.addMiniApp) return;
+  // Only prompt once per session
+  if (sessionStorage.getItem('bm_add_prompted')) return;
+  sessionStorage.setItem('bm_add_prompted', '1');
+  // Slight delay so it doesn't fire the instant the game loads
+  setTimeout(async () => {
+    try { await sdk.actions.addMiniApp(); } catch(e) { /* user dismissed — fine */ }
+  }, 2500);
+}
+
+// Open a URL via the Farcaster SDK when inside a frame (external links are
+// blocked by the frame sandbox), otherwise fall back to a normal window.open.
+function openExternalUrl(url) {
+  const sdk = window.farcasterSdk;
+  if (sdk && sdk.actions?.openUrl) {
+    sdk.actions.openUrl(url);
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer');
   }
 }
 
@@ -2134,7 +2190,9 @@ function shortAddr(a) {
 
 function txLink(hash) {
   const base = CHAINS[selectedChainId]?.explorer || 'https://etherscan.io';
-  return `<a href="${base}/tx/${hash}" class="tx-link" target="_blank" rel="noopener">${hash.slice(0,10)}…</a>`;
+  const url  = `${base}/tx/${hash}`;
+  const short = hash.slice(0,10) + '…';
+  return `<span class="tx-link" style="cursor:pointer;" onclick="openExternalUrl('${url}')">${short}</span>`;
 }
 
 function toast(title, msg, type='info') {
