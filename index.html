@@ -8,8 +8,15 @@
 <title>BaseMiner</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.1/ethers.umd.min.js"></script>
 <script type="module">
-  import { sdk } from 'https://esm.sh/@farcaster/frame-sdk@0.0.31';
-  window.farcasterSdk = sdk;
+  try {
+    // Load SDK and call ready() ASAP — this removes the Warpcast splash screen.
+    // We do this before anything else so a JS error later doesn't leave a blank page.
+    const { sdk } = await import('https://esm.sh/@farcaster/frame-sdk@0.0.31');
+    window.farcasterSdk = sdk;
+    await sdk.actions.ready();
+  } catch(e) {
+    // Not inside Warpcast, or SDK failed — that's fine, app works without it
+  }
   window.dispatchEvent(new Event('farcaster-sdk-ready'));
 </script>
 <style>
@@ -1232,13 +1239,16 @@ async function appInit() {
 }
 
 window.addEventListener('load', () => {
-  if (window.farcasterSdk) {
+  // Wait for the SDK module to signal ready, or proceed after 3s regardless.
+  // The SDK already called actions.ready() in the module above, so the splash
+  // screen is gone by now — this just wires up the wallet connection.
+  if (window.farcasterSdk !== undefined) {
     appInit();
   } else {
     let settled = false;
     const done = () => { if (!settled) { settled = true; appInit(); } };
     window.addEventListener('farcaster-sdk-ready', done, { once: true });
-    setTimeout(done, 2000);
+    setTimeout(done, 3000);
   }
 });
 
@@ -1336,13 +1346,17 @@ async function autoConnectBaseApp() {
 async function autoConnectFarcaster() {
   const sdk = window.farcasterSdk;
   try {
+    // Hide wallet button and chain switcher — managed by Farcaster
     const wbtn = document.getElementById('wallet-btn');
     if (wbtn) wbtn.style.display = 'none';
-    const fcBadge = document.getElementById('farcaster-badge');
-    if (fcBadge) fcBadge.classList.remove('hidden');
     const cbtn = document.getElementById('chain-badge-btn');
     if (cbtn) cbtn.style.display = 'none';
 
+    // Show Farcaster badge
+    const fcBadge = document.getElementById('farcaster-badge');
+    if (fcBadge) fcBadge.classList.remove('hidden');
+
+    // Lock to Base mainnet
     selectedChainId = 8453;
     cfg.chainId = 8453;
     applyChainTheme(8453);
@@ -1350,10 +1364,11 @@ async function autoConnectFarcaster() {
     updateChainBadge();
     renderChainList();
 
+    // Get user context
     const context = await sdk.context;
-    const fid  = context?.user?.fid;
-    const name = context?.user?.displayName || context?.user?.username || ('fid:' + fid);
+    const name = context?.user?.displayName || context?.user?.username || null;
 
+    // Connect wallet via Farcaster EIP-1193 provider
     const ethProvider = sdk.wallet.ethProvider;
     const accs = await ethProvider.request({ method: 'eth_requestAccounts' });
     address  = accs[0];
@@ -1371,25 +1386,15 @@ async function autoConnectFarcaster() {
     });
 
     updateWalletUI();
-    const wlabel = document.getElementById('wallet-label');
-    if (wlabel && name) wlabel.textContent = name;
-    initContracts();
-    await sdk.actions.ready();
-    toast('Farcaster connected', shortAddr(address), 'success');
-  } catch(e) {
-    try { await sdk.actions.ready(); } catch(_) {}
-    if (window.ethereum) {
-      try {
-        const accs = await window.ethereum.request({ method: 'eth_requestAccounts' });
-        address  = accs[0];
-        provider = new ethers.BrowserProvider(window.ethereum);
-        signer   = await provider.getSigner();
-        updateWalletUI();
-        initContracts();
-      } catch(e2) { toast('Connect failed', e2.message, 'error'); }
-    } else {
-      toast('Farcaster connect failed', e.message, 'error');
+    if (name) {
+      const wlabel = document.getElementById('wallet-label');
+      if (wlabel) wlabel.textContent = name;
     }
+    initContracts();
+    toast('Connected', shortAddr(address), 'success');
+  } catch(e) {
+    // Wallet connect failed but UI is already visible — just show error
+    toast('Wallet error', e.message || 'Could not connect wallet', 'error');
   }
 }
 
