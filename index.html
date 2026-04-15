@@ -5,16 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="talentapp:project_verification" content="17b2a555571a4d804a6ca94819cde35cfcb892d4477d56f12ef08c1a39de99b207a6ae75a3c68d384c784429b865071fcd5757f760008cde720dc012da72ddb8" />
 
-<!-- ══ Farcaster Mini App meta tags ══ -->
-<!-- Update these values with your actual hosted URL and image -->
+<!-- Farcaster Mini App meta tag -->
 <meta property="fc:frame" content='{"version":"next","imageUrl":"https://base-miner-facaster.vercel.app/og-image.png","button":{"title":"⛏ Play BaseMiner","action":{"type":"launch_frame","name":"BaseMiner","url":"https://base-miner-facaster.vercel.app/","splashImageUrl":"https://base-miner-facaster.vercel.app/splash.png","splashBackgroundColor":"#070a14"}}}' />
 
 <title>BaseMiner</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.1/ethers.umd.min.js"></script>
-<!-- Farcaster Mini App SDK -->
+<!-- Farcaster SDK: loaded as ES module, signals main script when ready -->
 <script type="module">
-  import { sdk } from 'https://esm.sh/@farcaster/frame-sdk@latest';
+  import { sdk } from 'https://esm.sh/@farcaster/frame-sdk@0.0.31';
   window.farcasterSdk = sdk;
+  window.dispatchEvent(new Event('farcaster-sdk-ready'));
 </script>
 <style>
   :root {
@@ -1197,16 +1197,17 @@ const isFarcaster  = () => !!(window.farcasterSdk);
 // ════════════════════════════════════════════════════════════════
 //  Init
 // ════════════════════════════════════════════════════════════════
-window.addEventListener('load', async () => {
+// appInit runs once both DOM and (optionally) Farcaster SDK are ready
+async function appInit() {
   loadStoredConfig();
   applyChainTheme(selectedChainId);
   renderChainList();
   updateChainBadge();
 
-  // ── Farcaster Mini App: init SDK and auto-connect ──
+  // Farcaster Mini App: SDK is loaded — auto-connect via frame wallet
   if (isFarcaster()) {
     await autoConnectFarcaster();
-    return; // Farcaster handles everything; skip legacy wallet listeners
+    return;
   }
 
   if (window.ethereum) {
@@ -1232,14 +1233,21 @@ window.addEventListener('load', async () => {
       }
     });
 
-    // MiniPay: auto-connect silently on load — no prompt or button needed
-    if (isMiniPay()) {
-      await autoConnectMiniPay();
-    }
-    // Base app (Coinbase Wallet): auto-connect silently on load
-    else if (isBaseApp()) {
-      await autoConnectBaseApp();
-    }
+    if (isMiniPay())      await autoConnectMiniPay();
+    else if (isBaseApp()) await autoConnectBaseApp();
+  }
+}
+
+window.addEventListener('load', () => {
+  // If the Farcaster SDK module already fired before 'load', run immediately.
+  // Otherwise wait up to 2s for it; if it never arrives, init without it.
+  if (window.farcasterSdk) {
+    appInit();
+  } else {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; appInit(); } };
+    window.addEventListener('farcaster-sdk-ready', done, { once: true });
+    setTimeout(done, 2000); // fallback: init anyway after 2s
   }
 });
 
@@ -1337,38 +1345,38 @@ async function autoConnectBaseApp() {
 async function autoConnectFarcaster() {
   const sdk = window.farcasterSdk;
   try {
-    // Hide native wallet button — Farcaster wallet is implicit
+    // Hide native wallet button
     const wbtn = document.getElementById('wallet-btn');
     if (wbtn) wbtn.style.display = 'none';
 
-    // Show Farcaster badge in topbar
+    // Show Farcaster badge
     const fcBadge = document.getElementById('farcaster-badge');
     if (fcBadge) fcBadge.classList.remove('hidden');
 
-    // Get Farcaster context (user info, fid, etc.)
-    const context = await sdk.context;
-    const fid  = context?.user?.fid;
-    const name = context?.user?.displayName || context?.user?.username || ('fid:' + fid);
+    // Hide chain switcher — lock to Base
+    const cbtn = document.getElementById('chain-badge-btn');
+    if (cbtn) cbtn.style.display = 'none';
 
-    // Lock to Base mainnet — the primary chain for Farcaster apps
+    // Lock to Base mainnet
     selectedChainId = 8453;
-    cfg.chainId     = 8453;
+    cfg.chainId = 8453;
     applyChainTheme(8453);
     applyChainAddresses(8453);
     updateChainBadge();
     renderChainList();
-    // Hide chain switcher — keep it simple for Farcaster users
-    const cbtn = document.getElementById('chain-badge-btn');
-    if (cbtn) cbtn.style.display = 'none';
 
-    // Connect via the Farcaster-provided EIP-1193 provider
+    // Get Farcaster user context
+    const context = await sdk.context;
+    const fid  = context?.user?.fid;
+    const name = context?.user?.displayName || context?.user?.username || ('fid:' + fid);
+
+    // Connect via Farcaster EIP-1193 provider
     const ethProvider = sdk.wallet.ethProvider;
     const accs = await ethProvider.request({ method: 'eth_requestAccounts' });
     address  = accs[0];
     provider = new ethers.BrowserProvider(ethProvider);
     signer   = await provider.getSigner();
 
-    // Listen for chain/account changes
     ethProvider.on('accountsChanged', newAccs => {
       address = newAccs[0] || null;
       updateWalletUI();
@@ -1376,31 +1384,20 @@ async function autoConnectFarcaster() {
     });
     ethProvider.on('chainChanged', hex => {
       const id = parseInt(hex, 16);
-      if (CHAINS[id]) {
-        selectedChainId = id;
-        applyChainTheme(id);
-        applyChainAddresses(id);
-        updateChainBadge();
-        initContracts();
-      }
+      if (CHAINS[id]) { selectedChainId = id; applyChainTheme(id); applyChainAddresses(id); updateChainBadge(); initContracts(); }
     });
 
     updateWalletUI();
-
-    // Update wallet label to show Farcaster display name
     const wlabel = document.getElementById('wallet-label');
     if (wlabel && name) wlabel.textContent = name;
-
     initContracts();
 
-    // Signal the host that the app is ready (removes splash screen)
+    // Signal Warpcast the app is ready — removes splash screen
     await sdk.actions.ready();
-
     toast('Farcaster connected', shortAddr(address), 'success');
   } catch(e) {
-    // Fallback: still call ready() so the splash screen clears even on error
     try { await sdk.actions.ready(); } catch(_) {}
-    // Fall back to regular wallet connect if Farcaster wallet fails
+    // Fallback to window.ethereum
     if (window.ethereum) {
       try {
         const accs = await window.ethereum.request({ method: 'eth_requestAccounts' });
@@ -1409,15 +1406,13 @@ async function autoConnectFarcaster() {
         signer   = await provider.getSigner();
         updateWalletUI();
         initContracts();
-        toast('Wallet connected', shortAddr(address), 'info');
-      } catch(e2) {
-        toast('Connect failed', e2.message, 'error');
-      }
+      } catch(e2) { toast('Connect failed', e2.message, 'error'); }
     } else {
       toast('Farcaster connect failed', e.message, 'error');
     }
   }
 }
+
 
 function loadStoredConfig() {
   try {
