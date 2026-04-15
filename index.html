@@ -10,17 +10,40 @@
      https://miniapps.farcaster.xyz/docs/guides/publishing -->
 <title>BaseMiner</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.1/ethers.umd.min.js"></script>
+<!--
+  Farcaster Mini App SDK — loaded as a classic (non-module) script so the
+  browser fetches it alongside the rest of the page resources. The UMD bundle
+  exposes the global `window.frame.sdk`, letting us call ready() synchronously
+  in the very next inline script — exactly what the Farcaster validator checks.
+  jsDelivr is used because it reliably serves the pre-built UMD dist file.
+-->
+<script src="https://cdn.jsdelivr.net/npm/@farcaster/frame-sdk/dist/index.min.js"
+        onerror="window.__fcSdkFailed=true"></script>
+<script>
+  // Call ready() as the very first JS that runs — before styles, before app
+  // logic. This is what removes the Warpcast splash screen immediately.
+  // The UMD bundle sets window.frame.sdk (per the official README).
+  (function () {
+    try {
+      var _sdk = window.frame && window.frame.sdk;
+      if (_sdk && _sdk.actions && _sdk.actions.ready) {
+        window.farcasterSdk = _sdk;
+        _sdk.actions.ready({ disableNativeGestures: true });
+      }
+    } catch (e) { /* not inside a Farcaster frame — perfectly fine */ }
+  })();
+</script>
 <script type="module">
-  try {
-    // Load SDK and call ready() ASAP — this removes the Warpcast splash screen.
-    // We do this before anything else so a JS error later doesn't leave a blank page.
-    // Using sdk@0.0.38+ which has stable context (not a Promise) and openUrl support.
-    const { sdk } = await import('https://esm.sh/@farcaster/frame-sdk@0.0.38');
-    window.farcasterSdk = sdk;
-    // sdk.isInMiniApp() (or sdk.context.client) tells us we're inside a frame
-    await sdk.actions.ready({ disableNativeGestures: true });
-  } catch(e) {
-    // Not inside Warpcast / Farcaster client, or SDK failed — app works without it
+  // Fallback: if the CDN script failed or the global wasn't set (e.g. network
+  // error), try the ESM build. ready() is idempotent so calling it twice is safe.
+  if (!window.farcasterSdk && !window.__fcSdkFailed) {
+    try {
+      const { sdk } = await import('https://esm.sh/@farcaster/frame-sdk');
+      if (sdk && sdk.actions) {
+        window.farcasterSdk = sdk;
+        await sdk.actions.ready({ disableNativeGestures: true });
+      }
+    } catch (e) { /* not in a frame or network error — app works without it */ }
   }
   window.dispatchEvent(new Event('farcaster-sdk-ready'));
 </script>
