@@ -17,7 +17,7 @@
     "tags": ["base", "mining", "onchain", "game", "tokens"],
     "tagline": "Mine. Upgrade. Dominate.",
     "heroImageUrl": "https://base-miner-facaster.vercel.app/og-image.png",
-    "ogTitle": "BaseMiner — Mine tokens on Base",
+    "ogTitle": "BaseMiner — Mine on Base",
     "ogDescription": "Click to mine CBALL tokens on Base. Upgrade your tools and climb the leaderboard.",
     "ogImageUrl": "https://base-miner-facaster.vercel.app/og-image.png",
     "requiredChains": ["eip155:8453"]
