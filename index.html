@@ -11,17 +11,27 @@
 <title>BaseMiner</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.1/ethers.umd.min.js"></script>
 <script type="module">
-  // Official Farcaster Mini App SDK pattern per miniapps.farcaster.xyz/docs/getting-started
-  // Package was renamed from @farcaster/frame-sdk → @farcaster/miniapp-sdk.
-  // The ESM import + immediate ready() call is the documented approach for plain HTML.
-  try {
-    const { sdk } = await import('https://esm.sh/@farcaster/miniapp-sdk');
-    window.farcasterSdk = sdk;
-    // ready() hides the splash screen — must be called after the app is ready to display.
-    await sdk.actions.ready({ disableNativeGestures: true });
-  } catch (e) {
-    // Not inside a Farcaster client, or SDK failed — app works fine without it.
+  // Farcaster Mini App SDK bootstrap.
+  // IMPORTANT: ready() must be called AFTER the page is rendered, not here in <head>.
+  // We load the SDK and stash it, then let appInit() call ready() once the DOM is live.
+  // We try two CDNs so a network hiccup on one doesn't break the whole load.
+  const SDK_URLS = [
+    'https://esm.sh/@farcaster/miniapp-sdk',
+    'https://cdn.jsdelivr.net/npm/@farcaster/miniapp-sdk/+esm',
+  ];
+  let sdkLoaded = false;
+  for (const url of SDK_URLS) {
+    try {
+      const { sdk } = await import(url);
+      window.farcasterSdk = sdk;
+      sdkLoaded = true;
+      break;
+    } catch (e) {
+      // Try next CDN
+    }
   }
+  // Signal whether SDK loaded (app proceeds either way)
+  window.farcasterSdkLoaded = sdkLoaded;
   window.dispatchEvent(new Event('farcaster-sdk-ready'));
 </script>
 <style>
@@ -1202,20 +1212,9 @@ const TOOL_EMOJIS = ['⛏️','🔩','🏗️'];
 // ════════════════════════════════════════════════════════════════
 const isMiniPay    = () => !!(window.ethereum && window.ethereum.isMiniPay);
 const isBaseApp    = () => !!(window.ethereum && window.ethereum.isCoinbaseWallet);
-// isFarcaster: true when window.farcasterSdk is present AND we have a client context,
-// i.e. we are running inside a Farcaster / Warpcast mini app frame.
-const isFarcaster  = () => {
-  const sdk = window.farcasterSdk;
-  if (!sdk) return false;
-  // sdk.context is synchronous in frame-sdk >= 0.0.38
-  try {
-    const ctx = sdk.context;
-    return !!(ctx && ctx.client);
-  } catch(e) {
-    // Older SDK or non-frame environment
-    return !!sdk;
-  }
-};
+// isFarcaster: SDK must be present. We resolve context in autoConnectFarcaster
+// since it may be a Promise — here we just check the SDK exists.
+const isFarcaster  = () => !!window.farcasterSdk;
 
 // ════════════════════════════════════════════════════════════════
 //  Init
@@ -1259,16 +1258,17 @@ async function appInit() {
 }
 
 window.addEventListener('load', () => {
-  // Wait for the SDK module to signal ready, or proceed after 3s regardless.
-  // The SDK already called actions.ready() in the module above, so the splash
-  // screen is gone by now — this just wires up the wallet connection.
-  if (window.farcasterSdk !== undefined) {
+  // The SDK module fires 'farcaster-sdk-ready' when done (or on error).
+  // If the event already fired before this listener registered (possible since
+  // the module script is in <head>), window.farcasterSdkLoaded is already set.
+  if (window.farcasterSdkLoaded !== undefined) {
     appInit();
   } else {
     let settled = false;
     const done = () => { if (!settled) { settled = true; appInit(); } };
     window.addEventListener('farcaster-sdk-ready', done, { once: true });
-    setTimeout(done, 3000);
+    // Generous timeout — SDK fetch can be slow inside Farcaster's sandbox
+    setTimeout(done, 5000);
   }
 });
 
@@ -1384,12 +1384,24 @@ async function autoConnectFarcaster() {
     updateChainBadge();
     renderChainList();
 
-    // sdk.context is synchronous in frame-sdk >= 0.0.38
-    // (it was a Promise in earlier versions — handle both for safety)
-    const rawContext = sdk.context;
-    const context = rawContext && typeof rawContext.then === 'function'
-      ? await rawContext
-      : rawContext;
+    // Call ready() NOW — DOM is painted, splash screen can be dismissed.
+    // Must happen before any async wallet calls so the user sees the UI ASAP.
+    try {
+      await sdk.actions.ready({ disableNativeGestures: true });
+    } catch(e) {
+      // Non-critical — app continues even if ready() fails
+    }
+
+    // sdk.context may be a Promise (older SDKs) or a plain object (>= 0.0.38).
+    // Resolve safely either way.
+    let context = null;
+    try {
+      const rawCtx = sdk.context;
+      context = rawCtx && typeof rawCtx.then === 'function'
+        ? await Promise.race([rawCtx, new Promise(r => setTimeout(() => r(null), 3000))])
+        : rawCtx;
+    } catch(e) { /* context unavailable */ }
+
     const name = context?.user?.displayName || context?.user?.username || null;
 
     // Connect wallet via Farcaster EIP-1193 provider.
