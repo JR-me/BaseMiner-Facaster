@@ -1210,11 +1210,19 @@ const TOOL_EMOJIS = ['⛏️','🔩','🏗️'];
 // ════════════════════════════════════════════════════════════════
 //  Wallet environment detection
 // ════════════════════════════════════════════════════════════════
-const isMiniPay    = () => !!(window.ethereum && window.ethereum.isMiniPay);
-const isBaseApp    = () => !!(window.ethereum && window.ethereum.isCoinbaseWallet);
-// isFarcaster: SDK must be present. We resolve context in autoConnectFarcaster
-// since it may be a Promise — here we just check the SDK exists.
-const isFarcaster  = () => !!window.farcasterSdk;
+const isMiniPay = () => !!(window.ethereum && window.ethereum.isMiniPay);
+const isBaseApp = () => !!(window.ethereum && window.ethereum.isCoinbaseWallet);
+// isFarcaster: uses the official sdk.isInMiniApp() which verifies context
+// communication rather than just checking if the SDK object exists.
+async function isFarcaster() {
+  const sdk = window.farcasterSdk;
+  if (!sdk) return false;
+  try {
+    return await sdk.isInMiniApp();
+  } catch(e) {
+    return false;
+  }
+}
 
 // ════════════════════════════════════════════════════════════════
 //  Init
@@ -1225,7 +1233,7 @@ async function appInit() {
   renderChainList();
   updateChainBadge();
 
-  if (isFarcaster()) {
+  if (await isFarcaster()) {
     await autoConnectFarcaster();
     return;
   }
@@ -1680,7 +1688,7 @@ function updateChainBadge() {
 //  Wallet
 // ════════════════════════════════════════════════════════════════
 async function connectWallet() {
-  if (isFarcaster()) { await autoConnectFarcaster(); return; }
+  if (await isFarcaster()) { await autoConnectFarcaster(); return; }
   if (!window.ethereum) {
     toast('No wallet found', 'Install MetaMask, Coinbase Wallet, or open this page inside the Base app.', 'error');
     return;
