@@ -1199,7 +1199,7 @@ const CHAINS = {
 // ════════════════════════════════════════════════════════════════
 //  App state
 // ════════════════════════════════════════════════════════════════
-let provider = null, signer = null, address = null;
+let provider = null, readProvider = null, signer = null, address = null;
 let selectedChainId = 8453;
 let contracts = { cball:null, miner:null, badge:null };
 let cfg = { cball:'', miner:'', badge:'', chainId:8453 };
@@ -1794,12 +1794,38 @@ async function checkNetworkMatch() {
 function initContracts() {
   if (!signer) return;
   try {
+    // Use a dedicated public JSON-RPC provider for all read calls.
+    // The Farcaster wallet provider routes eth_call through its own RPC
+    // which can fail with data=null even when the wallet itself is connected.
+    // Writes (mine, upgrade, transfer) still go through the signer / wallet.
+    const chain = CHAINS[selectedChainId];
+    const rpcUrl = chain?.rpc || null;
+    readProvider = rpcUrl ? new ethers.JsonRpcProvider(rpcUrl) : provider;
+
+    const reader = readProvider;
+    const writer = signer;
+
+    // Read-only contract instances (for stats, balances, leaderboard, etc.)
+    contracts.cbAllRead = cfg.cball && ethers.isAddress(cfg.cball)
+      ? new ethers.Contract(cfg.cball, CBALL_ABI, reader) : null;
+    contracts.minerRead = cfg.miner && ethers.isAddress(cfg.miner)
+      ? new ethers.Contract(cfg.miner, MINER_ABI, reader) : null;
+    contracts.badgeRead = cfg.badge && ethers.isAddress(cfg.badge)
+      ? new ethers.Contract(cfg.badge, BADGE_ABI, reader) : null;
+
+    // Write contract instances (for transactions — must use signer)
     contracts.cball = cfg.cball && ethers.isAddress(cfg.cball)
-      ? new ethers.Contract(cfg.cball, CBALL_ABI, signer) : null;
+      ? new ethers.Contract(cfg.cball, CBALL_ABI, writer) : null;
     contracts.miner = cfg.miner && ethers.isAddress(cfg.miner)
-      ? new ethers.Contract(cfg.miner, MINER_ABI, signer) : null;
+      ? new ethers.Contract(cfg.miner, MINER_ABI, writer) : null;
     contracts.badge = cfg.badge && ethers.isAddress(cfg.badge)
-      ? new ethers.Contract(cfg.badge, BADGE_ABI, signer) : null;
+      ? new ethers.Contract(cfg.badge, BADGE_ABI, writer) : null;
+
+    if (!contracts.minerRead) {
+      const chainName = chain?.name || 'this chain';
+      toast('No contracts found', `No miner contract is configured for ${chainName}.`, 'warn');
+    }
+
     refreshAll();
   } catch(e) { console.error(e); }
 }
@@ -1828,9 +1854,9 @@ async function checkAdminAccess() {
 
   // Fetch owner() from each contract that is loaded, in parallel
   const results = await Promise.allSettled([
-    contracts.cball  ? contracts.cball.owner()  : Promise.resolve(null),
-    contracts.miner  ? contracts.miner.owner()  : Promise.resolve(null),
-    contracts.badge  ? contracts.badge.owner()  : Promise.resolve(null),
+    (contracts.cbAllRead || contracts.cball)  ? (contracts.cbAllRead || contracts.cball).owner()  : Promise.resolve(null),
+    (contracts.minerRead || contracts.miner)  ? (contracts.minerRead || contracts.miner).owner()  : Promise.resolve(null),
+    (contracts.badgeRead || contracts.badge)  ? (contracts.badgeRead || contracts.badge).owner()  : Promise.resolve(null),
   ]);
 
   const [cballOwner, minerOwner, badgeOwner] = results.map(r =>
@@ -1894,13 +1920,14 @@ function lockSection(id, shouldLock) {
 //  Mine tab
 // ════════════════════════════════════════════════════════════════
 async function refreshMineData() {
-  if (!contracts.miner || !address) return;
+  if ((!contracts.miner && !contracts.minerRead) || !address) return;
   const c = CHAINS[selectedChainId];
   const sym = c ? c.tokenSymbol : '?';
   try {
-    const [totalMined, clicks, tool, yieldPerClick] = await contracts.miner.getStats(address);
-    const remaining   = await contracts.miner.globalSupplyRemaining();
-    const totalMinted = await contracts.miner.totalMinted();
+    const reader = contracts.minerRead || contracts.miner;
+    const [totalMined, clicks, tool, yieldPerClick] = await reader.getStats(address);
+    const remaining   = await reader.globalSupplyRemaining();
+    const totalMinted = await reader.totalMinted();
 
     document.getElementById('stat-mined').textContent     = totalMined.toString();
     document.getElementById('stat-clicks').textContent    = clicks.toString();
@@ -1978,16 +2005,17 @@ async function doUpgrade() {
 //  Token tab
 // ════════════════════════════════════════════════════════════════
 async function refreshTokenData() {
-  if (!contracts.cball || !address) return;
+  if ((!contracts.cball && !contracts.cbAllRead) || !address) return;
   const c = CHAINS[selectedChainId];
   const sym = c ? c.tokenSymbol : '?';
   try {
+    const reader = contracts.cbAllRead || contracts.cball;
     const [bal, supply, paused, minter, owner] = await Promise.all([
-      contracts.cball.balanceOf(address),
-      contracts.cball.totalSupply(),
-      contracts.cball.paused(),
-      contracts.cball.minter(),
-      contracts.cball.owner()
+      reader.balanceOf(address),
+      reader.totalSupply(),
+      reader.paused(),
+      reader.minter(),
+      reader.owner()
     ]);
     document.getElementById('tok-balance').textContent = bal.toString();
     document.getElementById('tok-supply').textContent  = Number(supply).toLocaleString();
@@ -2038,11 +2066,12 @@ async function doCheckAllowance() {
 async function refreshBadgeData() {
   if (!contracts.badge) return;
   try {
+    const badgeReader = contracts.badgeRead || contracts.badge;
     const [lc, rc, cc, paused] = await Promise.all([
-      contracts.badge.legendaryCount(),
-      contracts.badge.rareCount(),
-      contracts.badge.commonCount(),
-      contracts.badge.paused()
+      badgeReader.legendaryCount(),
+      badgeReader.rareCount(),
+      badgeReader.commonCount(),
+      badgeReader.paused()
     ]);
     document.getElementById('badge-legendary-count').textContent = lc.toString();
     document.getElementById('badge-rare-count').textContent      = rc.toString();
@@ -2118,7 +2147,7 @@ async function loadLeaderboard() {
   const sym   = CHAINS[selectedChainId]?.tokenSymbol || '?';
   tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text3)">Loading…</td></tr>';
   try {
-    const [addrs, totals] = await contracts.miner.getLeaderboard();
+    const [addrs, totals] = await (contracts.minerRead || contracts.miner).getLeaderboard();
     if (!addrs.length) {
       tbody.innerHTML = `<tr><td colspan="4"><div class="empty"><div class="empty-icon">🏆</div><div class="empty-text">No miners yet — be the first!</div></div></td></tr>`;
       return;
