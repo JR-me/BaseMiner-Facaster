@@ -1199,7 +1199,7 @@ const CHAINS = {
 // ════════════════════════════════════════════════════════════════
 //  App state
 // ════════════════════════════════════════════════════════════════
-let provider = null, readProvider = null, signer = null, address = null;
+let provider = null, signer = null, address = null;
 let selectedChainId = 8453;
 let contracts = { cball:null, miner:null, badge:null };
 let cfg = { cball:'', miner:'', badge:'', chainId:8453 };
@@ -1412,10 +1412,6 @@ async function autoConnectFarcaster() {
 
     const name = context?.user?.displayName || context?.user?.username || null;
 
-    // Try to get address from context first (most reliable in Farcaster frames).
-    // context.client.connectedAddress is available in SDK >= 0.0.38.
-    const ctxAddress = context?.client?.connectedAddress || null;
-
     // Connect wallet via Farcaster EIP-1193 provider.
     // In SDK >= 0.0.38 the provider lives at sdk.wallet.ethProvider.
     const ethProvider = sdk.wallet?.ethProvider || sdk.wallet?.provider;
@@ -1423,50 +1419,10 @@ async function autoConnectFarcaster() {
       toast('Wallet error', 'No Ethereum provider from Farcaster SDK', 'error');
       return;
     }
-
-    // Get accounts — fall back to context address if eth_requestAccounts fails or returns empty.
-    let accs = [];
-    try {
-      accs = await ethProvider.request({ method: 'eth_requestAccounts' });
-    } catch(e) {
-      console.warn('eth_requestAccounts failed, using context address', e);
-    }
-    address = accs?.[0] || ctxAddress || null;
-    if (!address) {
-      toast('Wallet error', 'Could not get wallet address from Farcaster. Try reconnecting.', 'error');
-      return;
-    }
-
+    const accs = await ethProvider.request({ method: 'eth_requestAccounts' });
+    address  = accs[0];
     provider = new ethers.BrowserProvider(ethProvider);
     signer   = await provider.getSigner();
-
-    // Verify the wallet is on Base mainnet — request a switch if not.
-    try {
-      const net = await provider.getNetwork();
-      const walletChainId = Number(net.chainId);
-      if (walletChainId !== 8453) {
-        try {
-          await ethProvider.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: '0x2105' }], // Base mainnet
-          });
-        } catch(switchErr) {
-          // Switch failed — fall back to whichever chain the wallet is on.
-          if (CHAINS[walletChainId]) {
-            selectedChainId = walletChainId;
-            cfg.chainId = walletChainId;
-            applyChainTheme(walletChainId);
-            applyChainAddresses(walletChainId);
-            updateChainBadge();
-            renderChainList();
-          } else {
-            toast('Wrong network', 'Please switch to Base mainnet in your Farcaster wallet. (chain: ' + walletChainId + ')', 'warn');
-          }
-        }
-      }
-    } catch(netErr) {
-      console.warn('Could not verify network in Farcaster frame', netErr);
-    }
 
     ethProvider.on('accountsChanged', newAccs => {
       address = newAccs[0] || null;
@@ -1794,38 +1750,12 @@ async function checkNetworkMatch() {
 function initContracts() {
   if (!signer) return;
   try {
-    // Use a dedicated public JSON-RPC provider for all read calls.
-    // The Farcaster wallet provider routes eth_call through its own RPC
-    // which can fail with data=null even when the wallet itself is connected.
-    // Writes (mine, upgrade, transfer) still go through the signer / wallet.
-    const chain = CHAINS[selectedChainId];
-    const rpcUrl = chain?.rpc || null;
-    readProvider = rpcUrl ? new ethers.JsonRpcProvider(rpcUrl) : provider;
-
-    const reader = readProvider;
-    const writer = signer;
-
-    // Read-only contract instances (for stats, balances, leaderboard, etc.)
-    contracts.cbAllRead = cfg.cball && ethers.isAddress(cfg.cball)
-      ? new ethers.Contract(cfg.cball, CBALL_ABI, reader) : null;
-    contracts.minerRead = cfg.miner && ethers.isAddress(cfg.miner)
-      ? new ethers.Contract(cfg.miner, MINER_ABI, reader) : null;
-    contracts.badgeRead = cfg.badge && ethers.isAddress(cfg.badge)
-      ? new ethers.Contract(cfg.badge, BADGE_ABI, reader) : null;
-
-    // Write contract instances (for transactions — must use signer)
     contracts.cball = cfg.cball && ethers.isAddress(cfg.cball)
-      ? new ethers.Contract(cfg.cball, CBALL_ABI, writer) : null;
+      ? new ethers.Contract(cfg.cball, CBALL_ABI, signer) : null;
     contracts.miner = cfg.miner && ethers.isAddress(cfg.miner)
-      ? new ethers.Contract(cfg.miner, MINER_ABI, writer) : null;
+      ? new ethers.Contract(cfg.miner, MINER_ABI, signer) : null;
     contracts.badge = cfg.badge && ethers.isAddress(cfg.badge)
-      ? new ethers.Contract(cfg.badge, BADGE_ABI, writer) : null;
-
-    if (!contracts.minerRead) {
-      const chainName = chain?.name || 'this chain';
-      toast('No contracts found', `No miner contract is configured for ${chainName}.`, 'warn');
-    }
-
+      ? new ethers.Contract(cfg.badge, BADGE_ABI, signer) : null;
     refreshAll();
   } catch(e) { console.error(e); }
 }
@@ -1854,9 +1784,9 @@ async function checkAdminAccess() {
 
   // Fetch owner() from each contract that is loaded, in parallel
   const results = await Promise.allSettled([
-    (contracts.cbAllRead || contracts.cball)  ? (contracts.cbAllRead || contracts.cball).owner()  : Promise.resolve(null),
-    (contracts.minerRead || contracts.miner)  ? (contracts.minerRead || contracts.miner).owner()  : Promise.resolve(null),
-    (contracts.badgeRead || contracts.badge)  ? (contracts.badgeRead || contracts.badge).owner()  : Promise.resolve(null),
+    contracts.cball  ? contracts.cball.owner()  : Promise.resolve(null),
+    contracts.miner  ? contracts.miner.owner()  : Promise.resolve(null),
+    contracts.badge  ? contracts.badge.owner()  : Promise.resolve(null),
   ]);
 
   const [cballOwner, minerOwner, badgeOwner] = results.map(r =>
@@ -1920,14 +1850,13 @@ function lockSection(id, shouldLock) {
 //  Mine tab
 // ════════════════════════════════════════════════════════════════
 async function refreshMineData() {
-  if ((!contracts.miner && !contracts.minerRead) || !address) return;
+  if (!contracts.miner || !address) return;
   const c = CHAINS[selectedChainId];
   const sym = c ? c.tokenSymbol : '?';
   try {
-    const reader = contracts.minerRead || contracts.miner;
-    const [totalMined, clicks, tool, yieldPerClick] = await reader.getStats(address);
-    const remaining   = await reader.globalSupplyRemaining();
-    const totalMinted = await reader.totalMinted();
+    const [totalMined, clicks, tool, yieldPerClick] = await contracts.miner.getStats(address);
+    const remaining   = await contracts.miner.globalSupplyRemaining();
+    const totalMinted = await contracts.miner.totalMinted();
 
     document.getElementById('stat-mined').textContent     = totalMined.toString();
     document.getElementById('stat-clicks').textContent    = clicks.toString();
@@ -1957,10 +1886,7 @@ async function refreshMineData() {
       document.getElementById('progress-left').textContent      = 'Max tier reached';
       document.getElementById('progress-right').textContent     = '';
     }
-  } catch(e) {
-    console.error('refreshMineData', e);
-    toast('Stats failed to load', e.reason || e.message, 'error');
-  }
+  } catch(e) { console.error('refreshMineData', e); }
 }
 
 async function doMine() {
@@ -2005,17 +1931,16 @@ async function doUpgrade() {
 //  Token tab
 // ════════════════════════════════════════════════════════════════
 async function refreshTokenData() {
-  if ((!contracts.cball && !contracts.cbAllRead) || !address) return;
+  if (!contracts.cball || !address) return;
   const c = CHAINS[selectedChainId];
   const sym = c ? c.tokenSymbol : '?';
   try {
-    const reader = contracts.cbAllRead || contracts.cball;
     const [bal, supply, paused, minter, owner] = await Promise.all([
-      reader.balanceOf(address),
-      reader.totalSupply(),
-      reader.paused(),
-      reader.minter(),
-      reader.owner()
+      contracts.cball.balanceOf(address),
+      contracts.cball.totalSupply(),
+      contracts.cball.paused(),
+      contracts.cball.minter(),
+      contracts.cball.owner()
     ]);
     document.getElementById('tok-balance').textContent = bal.toString();
     document.getElementById('tok-supply').textContent  = Number(supply).toLocaleString();
@@ -2023,10 +1948,7 @@ async function refreshTokenData() {
     document.getElementById('tok-paused').className    = 'stat-val ' + (paused ? 'amber' : 'green');
     document.getElementById('tok-minter').textContent  = shortAddr(minter);
     document.getElementById('tok-owner').textContent   = shortAddr(owner);
-  } catch(e) {
-    console.error('refreshTokenData', e);
-    toast('Token data failed', e.reason || e.message, 'error');
-  }
+  } catch(e) { console.error('refreshTokenData', e); }
 }
 
 async function doTransfer() {
@@ -2066,12 +1988,11 @@ async function doCheckAllowance() {
 async function refreshBadgeData() {
   if (!contracts.badge) return;
   try {
-    const badgeReader = contracts.badgeRead || contracts.badge;
     const [lc, rc, cc, paused] = await Promise.all([
-      badgeReader.legendaryCount(),
-      badgeReader.rareCount(),
-      badgeReader.commonCount(),
-      badgeReader.paused()
+      contracts.badge.legendaryCount(),
+      contracts.badge.rareCount(),
+      contracts.badge.commonCount(),
+      contracts.badge.paused()
     ]);
     document.getElementById('badge-legendary-count').textContent = lc.toString();
     document.getElementById('badge-rare-count').textContent      = rc.toString();
@@ -2088,10 +2009,7 @@ async function refreshBadgeData() {
     setBadgeState('common', ce, cc2);
     setBadgeState('rare',   re, rc2);
     setBadgeLegendaryState(le, lc2);
-  } catch(e) {
-    console.error('badge eligibility', e);
-    toast('Badge data failed', e.reason || e.message, 'error');
-  }
+  } catch(e) { console.error('badge eligibility', e); }
 }
 
 function setBadgeState(tier, eligible, claimed) {
@@ -2147,7 +2065,7 @@ async function loadLeaderboard() {
   const sym   = CHAINS[selectedChainId]?.tokenSymbol || '?';
   tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text3)">Loading…</td></tr>';
   try {
-    const [addrs, totals] = await (contracts.minerRead || contracts.miner).getLeaderboard();
+    const [addrs, totals] = await contracts.miner.getLeaderboard();
     if (!addrs.length) {
       tbody.innerHTML = `<tr><td colspan="4"><div class="empty"><div class="empty-icon">🏆</div><div class="empty-text">No miners yet — be the first!</div></div></td></tr>`;
       return;
