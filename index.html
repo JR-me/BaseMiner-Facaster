@@ -1412,6 +1412,10 @@ async function autoConnectFarcaster() {
 
     const name = context?.user?.displayName || context?.user?.username || null;
 
+    // Try to get address from context first (most reliable in Farcaster frames).
+    // context.client.connectedAddress is available in SDK >= 0.0.38.
+    const ctxAddress = context?.client?.connectedAddress || null;
+
     // Connect wallet via Farcaster EIP-1193 provider.
     // In SDK >= 0.0.38 the provider lives at sdk.wallet.ethProvider.
     const ethProvider = sdk.wallet?.ethProvider || sdk.wallet?.provider;
@@ -1419,10 +1423,50 @@ async function autoConnectFarcaster() {
       toast('Wallet error', 'No Ethereum provider from Farcaster SDK', 'error');
       return;
     }
-    const accs = await ethProvider.request({ method: 'eth_requestAccounts' });
-    address  = accs[0];
+
+    // Get accounts — fall back to context address if eth_requestAccounts fails or returns empty.
+    let accs = [];
+    try {
+      accs = await ethProvider.request({ method: 'eth_requestAccounts' });
+    } catch(e) {
+      console.warn('eth_requestAccounts failed, using context address', e);
+    }
+    address = accs?.[0] || ctxAddress || null;
+    if (!address) {
+      toast('Wallet error', 'Could not get wallet address from Farcaster. Try reconnecting.', 'error');
+      return;
+    }
+
     provider = new ethers.BrowserProvider(ethProvider);
     signer   = await provider.getSigner();
+
+    // Verify the wallet is on Base mainnet — request a switch if not.
+    try {
+      const net = await provider.getNetwork();
+      const walletChainId = Number(net.chainId);
+      if (walletChainId !== 8453) {
+        try {
+          await ethProvider.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: '0x2105' }], // Base mainnet
+          });
+        } catch(switchErr) {
+          // Switch failed — fall back to whichever chain the wallet is on.
+          if (CHAINS[walletChainId]) {
+            selectedChainId = walletChainId;
+            cfg.chainId = walletChainId;
+            applyChainTheme(walletChainId);
+            applyChainAddresses(walletChainId);
+            updateChainBadge();
+            renderChainList();
+          } else {
+            toast('Wrong network', 'Please switch to Base mainnet in your Farcaster wallet. (chain: ' + walletChainId + ')', 'warn');
+          }
+        }
+      }
+    } catch(netErr) {
+      console.warn('Could not verify network in Farcaster frame', netErr);
+    }
 
     ethProvider.on('accountsChanged', newAccs => {
       address = newAccs[0] || null;
@@ -1886,7 +1930,10 @@ async function refreshMineData() {
       document.getElementById('progress-left').textContent      = 'Max tier reached';
       document.getElementById('progress-right').textContent     = '';
     }
-  } catch(e) { console.error('refreshMineData', e); }
+  } catch(e) {
+    console.error('refreshMineData', e);
+    toast('Stats failed to load', e.reason || e.message, 'error');
+  }
 }
 
 async function doMine() {
@@ -1948,7 +1995,10 @@ async function refreshTokenData() {
     document.getElementById('tok-paused').className    = 'stat-val ' + (paused ? 'amber' : 'green');
     document.getElementById('tok-minter').textContent  = shortAddr(minter);
     document.getElementById('tok-owner').textContent   = shortAddr(owner);
-  } catch(e) { console.error('refreshTokenData', e); }
+  } catch(e) {
+    console.error('refreshTokenData', e);
+    toast('Token data failed', e.reason || e.message, 'error');
+  }
 }
 
 async function doTransfer() {
@@ -2009,7 +2059,10 @@ async function refreshBadgeData() {
     setBadgeState('common', ce, cc2);
     setBadgeState('rare',   re, rc2);
     setBadgeLegendaryState(le, lc2);
-  } catch(e) { console.error('badge eligibility', e); }
+  } catch(e) {
+    console.error('badge eligibility', e);
+    toast('Badge data failed', e.reason || e.message, 'error');
+  }
 }
 
 function setBadgeState(tier, eligible, claimed) {
